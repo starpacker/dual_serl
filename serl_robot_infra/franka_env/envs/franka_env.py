@@ -3,7 +3,7 @@ import numpy as np
 import gym
 import cv2
 import copy
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 import time
 import requests
 import queue
@@ -11,10 +11,12 @@ import threading
 from datetime import datetime
 from collections import OrderedDict
 from typing import Dict
+from ipdb import set_trace
+from tqdm import trange
 
 from franka_env.camera.video_capture import VideoCapture
 from franka_env.camera.rs_capture import RSCapture
-from franka_env.utils.rotations import euler_2_quat, quat_2_euler
+from franka_env.utils.rotations import euler_2_quat, quat_2_euler, quaternion_distance, euler_translation_to_homogeneous_matrix, homogeneous_matrix_to_euler_translation, quaternion_product
 
 
 class ImageDisplayer(threading.Thread):
@@ -70,7 +72,7 @@ class DefaultEnvConfig:
 class FrankaEnv(gym.Env):
     def __init__(
         self,
-        hz=10,
+        hz=15,
         fake_env=False,
         save_video=False,
         config: DefaultEnvConfig = None,
@@ -145,9 +147,9 @@ class FrankaEnv(gym.Env):
                         "wrist_1": gym.spaces.Box(
                             0, 255, shape=(128, 128, 3), dtype=np.uint8
                         ),
-                        "wrist_2": gym.spaces.Box(
-                            0, 255, shape=(128, 128, 3), dtype=np.uint8
-                        ),
+                        # "wrist_2": gym.spaces.Box(
+                        #     0, 255, shape=(128, 128, 3), dtype=np.uint8
+                        # ),
                     }
                 ),
             }
@@ -163,6 +165,18 @@ class FrankaEnv(gym.Env):
         self.displayer = ImageDisplayer(self.img_queue)
         self.displayer.start()
         print("Initialized Franka")
+        
+        # homing the robot
+        self.go_to_rest(joint_reset=True)
+        requests.post(self.url + "clearforce")
+        time.sleep(0.1)
+        
+        
+        # reward cache
+        self.prev_trans_dist_xy = None
+        self.prev_trans_dist_z = None
+        self.prev_rot_dist = None
+
 
     def clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
         """Clip the pose to be within the safety box."""
@@ -193,6 +207,7 @@ class FrankaEnv(gym.Env):
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
         xyz_delta = action[:3]
+        print("xyz_delta: ", xyz_delta)
 
         self.nextpos = self.currpos.copy()
         self.nextpos[:3] = self.nextpos[:3] + xyz_delta * self.action_scale[0]
@@ -214,28 +229,121 @@ class FrankaEnv(gym.Env):
 
         self._update_currpos()
         ob = self._get_obs()
-        reward = self.compute_reward(ob, gripper_action_effective)
-        done = self.curr_path_length >= self.max_episode_length or reward == 1
+        reward, is_success = self.compute_reward(ob, gripper_action_effective)
+        done = self.curr_path_length >= self.max_episode_length or is_success
         return ob, reward, done, False, {}
 
-    def compute_reward(self, obs, gripper_action_effective) -> bool:
-        """We are using a sparse reward function."""
+    # def compute_reward(self, obs, gripper_action_effective) -> bool:
+    #     """We are using a sparse reward function."""
+    #     current_pose = obs["state"]["tcp_pose"]
+    #     # convert from quat to euler first
+    #     euler_angles = quat_2_euler(current_pose[3:])
+    #     euler_angles = np.abs(euler_angles)
+    #     current_pose = np.hstack([current_pose[:3], euler_angles])
+    #     delta = np.abs(current_pose - self._TARGET_POSE)
+    #     if np.all(delta < self._REWARD_THRESHOLD):
+    #         reward = 1
+    #     else:
+    #         # print(f'Goal not reached, the difference is {delta}, the desired threshold is {_REWARD_THRESHOLD}')
+    #         reward = 0
+
+    #     if self.config.APPLY_GRIPPER_PENALTY and gripper_action_effective:
+    #         reward -= self.config.GRIPPER_PENALTY
+
+    #     return reward
+    
+
+    def compute_reward(self, obs, gripper_action_effective=True):
+        ''' compute the reward based on the current pose 
+            whether need to calculate the ry,rz reward respectively?
+        '''
         current_pose = obs["state"]["tcp_pose"]
-        # convert from quat to euler first
+        # wxyz to xyzw
+        current_quat_wxyz = current_pose[3:]
+        current_quat_xyzw = np.array([current_quat_wxyz[1], current_quat_wxyz[2], current_quat_wxyz[3], current_quat_wxyz[0]])
+        current_pose = np.concatenate([current_pose[:3], current_quat_xyzw])
+        
+        _current_pose_6d = np.concatenate([current_pose[:3], quat_2_euler(current_pose[3:])])
+        _target_pose_matrix = euler_translation_to_homogeneous_matrix(self._TARGET_POSE)
+        _current_pose_matrix = euler_translation_to_homogeneous_matrix(_current_pose_6d)
+        target_T_current = np.linalg.inv(_target_pose_matrix) @ _current_pose_matrix   
+        target_T_current_6d = homogeneous_matrix_to_euler_translation(target_T_current)
+        target_T_target = np.eye(4)
+        target_T_target_6d = homogeneous_matrix_to_euler_translation(target_T_target)
+        # compute delta
         euler_angles = quat_2_euler(current_pose[3:])
         euler_angles = np.abs(euler_angles)
         current_pose = np.hstack([current_pose[:3], euler_angles])
-        delta = np.abs(current_pose - self._TARGET_POSE)
-        if np.all(delta < self._REWARD_THRESHOLD):
-            reward = 1
-        else:
-            # print(f'Goal not reached, the difference is {delta}, the desired threshold is {_REWARD_THRESHOLD}')
+
+        # if self.reward_noise:
+        #     # to simulate the pose-estimation noise
+        #     for i in range(6):
+        #         current_pose[i] += np.random.uniform(-self.reward_disturbance_6d[i], self.reward_disturbance_6d[i])
+        
+        _target_pose = np.hstack([self._TARGET_POSE[:3], np.abs(self._TARGET_POSE[3:])])
+
+        current_pose = target_T_current_6d
+        _target_pose = target_T_target_6d
+
+        delta = np.abs(current_pose - _target_pose)
+        print("delta: ", delta)
+
+        # compute success identifier
+        is_success = np.all(delta < self._REWARD_THRESHOLD) # successfully inserted
+        # is_reward_z = np.all(delta[:2] < 0.01) or (current_pose - self._TARGET_POSE)[2] > 0.015 # xy position is within 1cm, or cable is too high, then it's okay to reward z
+        is_reward_z = np.all(delta[:2] < 0.008) or (current_pose - _target_pose)[2] > 0.015 # xy position is within 1cm, or cable is too high, then it's okay to reward z
+
+        # compute translation distance
+        curr_trans_dist_xy = np.linalg.norm(delta[:2])
+        curr_trans_dist_z = np.linalg.norm(delta[2:3])
+
+        # compute rotation distance
+        # curr_quat = euler_2_quat(current_pose[3:])
+        # target_quat = euler_2_quat(self._TARGET_POSE[3:])
+        curr_quat = euler_2_quat(current_pose[3:])
+        target_quat = euler_2_quat(_target_pose[3:])
+        curr_rot_dist = quaternion_distance(curr_quat, target_quat) # degrees
+        # curr_rot_dist = quaternion_distance(curr_quat, target_quat) # dot_product
+
+        if self.prev_trans_dist_xy is None and self.prev_trans_dist_z is None and self.prev_rot_dist is None:
             reward = 0
+        else:
+            trans_scale = 2000
+            rot_scale = 1
+            xy_ratio = 0.7
 
-        if self.config.APPLY_GRIPPER_PENALTY and gripper_action_effective:
-            reward -= self.config.GRIPPER_PENALTY
+            trans_reward_xy = (self.prev_trans_dist_xy - curr_trans_dist_xy) * xy_ratio
+            trans_reward_z = (self.prev_trans_dist_z - curr_trans_dist_z) * (1 - xy_ratio) * is_reward_z
+            trans_reward = trans_reward_xy + trans_reward_z 
+            rot_reward = self.prev_rot_dist - curr_rot_dist
+            reward = trans_reward * trans_scale + rot_reward * rot_scale
 
-        return reward
+            # to distinguish success from failures
+            if is_success:
+                reward += 100
+
+            # print success
+            print("is_reward_z: ", is_reward_z)
+            print("is_success: ", is_success)
+            
+            # print dists
+            print("rot_dist: ", curr_rot_dist)
+            print("trans_dist_xy: ", curr_trans_dist_xy)
+            print("trans_dist_z: ", curr_trans_dist_z)
+
+            # print rewards
+            print("trans_reward_xy: ", trans_reward_xy * trans_scale)
+            print("trans_reward_z: ", trans_reward_z * trans_scale)
+            print("trans_reward: ", trans_reward * trans_scale)
+            print("rot_reward: ", rot_reward * rot_scale)
+            print("total_reward: ", reward)
+        
+        self.prev_trans_dist_xy = np.array(curr_trans_dist_xy)
+        self.prev_trans_dist_z = np.array(curr_trans_dist_z)
+        self.prev_rot_dist = np.array(curr_rot_dist)
+    
+        return reward, is_success
+
 
     def crop_image(self, name, image) -> np.ndarray:
         """Crop realsense images to be a square."""
@@ -277,11 +385,27 @@ class FrankaEnv(gym.Env):
     def interpolate_move(self, goal: np.ndarray, timeout: float):
         """Move the robot to the goal position with linear interpolation."""
         steps = int(timeout * self.hz)
+        
+        # steps = 2
+        # set_trace()
         self._update_currpos()
-        path = np.linspace(self.currpos, goal, steps)
-        for p in path:
-            self._send_pos_command(p)
-            time.sleep(1 / self.hz)
+        ### error, quat cannot use linear interpolation
+
+        # path = np.linspace(self.currpos, goal, steps)
+        # for p in path:
+        #     self._send_pos_command(p)
+        #     time.sleep(1 / self.hz)
+        
+        slerp = Slerp(
+            times=[0,1], rotations=Rotation.from_quat([self.currpos[3:], goal[3:]])
+        )
+        path = np.linspace(0, 1, steps)
+        interp_rots = slerp(path).as_quat()
+        interp_trans = np.linspace(self.currpos[:3], goal[:3], steps)
+        
+        for trans, rot in zip(interp_trans, interp_rots):
+            self._send_pos_command(np.concatenate([trans, rot]))
+        
         self._update_currpos()
 
     def go_to_rest(self, joint_reset=False):
@@ -299,7 +423,8 @@ class FrankaEnv(gym.Env):
             print("JOINT RESET")
             requests.post(self.url + "jointreset")
             time.sleep(0.5)
-
+        
+        # set_trace()
         # Perform Carteasian reset
         if self.randomreset:  # randomize reset position in xy plane
             reset_pose = self.resetpos.copy()
@@ -312,14 +437,22 @@ class FrankaEnv(gym.Env):
             )
             reset_pose[3:] = euler_2_quat(euler_random)
             self.interpolate_move(reset_pose, timeout=1.5)
+            # self._send_pos_command(reset_pose)
+            time.sleep(1.5)
         else:
+            # set_trace()
             reset_pose = self.resetpos.copy()
+            # self._send_pos_command(reset_pose)
+            # time.sleep(1.5)
+            # set_trace()
             self.interpolate_move(reset_pose, timeout=1.5)
+            time.sleep(1.5)
 
         # Change to compliance mode
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
 
     def reset(self, joint_reset=False, **kwargs):
+        
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
         if self.save_video:
             self.save_video_recording()
@@ -328,13 +461,21 @@ class FrankaEnv(gym.Env):
         if self.cycle_count % self.joint_reset_cycle == 0:
             self.cycle_count = 0
             joint_reset = True
-
+        
         self.go_to_rest(joint_reset=joint_reset)
         self._recover()
         self.curr_path_length = 0
+        
+        #set_trace()
 
         self._update_currpos()
         obs = self._get_obs()
+        
+        
+        # reward cache
+        self.prev_trans_dist_xy = None
+        self.prev_trans_dist_z = None
+        self.prev_rot_dist = None
 
         return obs, {}
 

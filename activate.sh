@@ -1,37 +1,24 @@
-# start ros and kill prev processes
-pkill -SIGINT -f roscore
-sleep 3
-roscore &
-
-# Debugging information
-echo "Stopping previous leaphand_node.py process..."
-pkill -2 -f leaphand_node.py
-
 # Initialize Conda
 echo "Initializing Conda..."
-source ~/anaconda3/etc/profile.d/conda.sh
+source ~/Miniconda3/etc/profile.d/conda.sh
+
+sleep 1
 
 # Activate the environment and run leaphand_node.py
 echo "Activating the base Conda environment..."
 conda activate base
 
-
-# Wait a few seconds to ensure pkill ends
-sleep 2
-
-echo "Running leaphand_node.py..."
-rosrun leap_hand leaphand_node.py &
-
-# Wait a few seconds to ensure leaphand_node.py starts
-sleep 2
+sleep 1
 
 # Activate the 'serl' environment and run the server
-echo "Activating the 'serl' Conda environment..."
-conda activate serl
+echo "Activating the 'dual_serl' Conda environment..."
+conda activate dual_serl
+
+sleep 1
 
 # activate robot server
-echo "Running robot_server/server.py..."
-python robot_server/server.py
+echo "Running robot_server flexiv_server.py..."
+python serl_robot_infra/robot_servers/flexiv_server.py
 
 
 
