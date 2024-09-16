@@ -1,5 +1,6 @@
 """
 This file starts a control server running on the real time PC connected to the franka robot.
+Reference: https://rdk.flexiv.com/api/classflexiv_1_1rdk_1_1_robot.html#ad65e38f8694b28d0704d29806f5d6d57
 """
 from flask import Flask, request, jsonify
 import numpy as np
@@ -17,6 +18,12 @@ from utils import parse_pt_states
 from utils import list2str
 import spdlog  # pip install spdlog
 from ipdb import set_trace
+
+def print_green(text: str) -> None:
+    GREEN = "\033[92m"  # ANSI 转义码，用于设置绿色文本
+    RESET = "\033[0m"   # ANSI 转义码，用于重置颜色
+    print(f"{GREEN}{text}{RESET}")
+
 
 
 # FLAGS = flags.FLAGS
@@ -53,7 +60,7 @@ class FlexivServer:
         # Define alias
         self.logger = spdlog.ConsoleLogger("Example")
         self.mode = flexivrdk.Mode
-
+        
         self.robot = flexivrdk.Robot(robot_sn)
       
         # Clear fault on the connected robot if any
@@ -114,20 +121,45 @@ class FlexivServer:
             time.sleep(1)
         self.start_impedance()
         
-    
-    # def start_impedance(self, stiffness=0.05): # M9D13, stable, not flipping
+
+    def output(self):
+        import importlib.util
+        import os
+
+        # 模块文件的路径
+        module_path = os.path.join('/home/wmingd/Projects/dualarm-serl/serl_robot_infra/franka_env/envs/peg_env', 'config.py')
+
+        # 加载模块
+        spec = importlib.util.spec_from_file_location("PegEnvConfig", module_path)
+        config = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(config)
+
+        # 访问参数
+        print(config.PegEnvConfig.PRECISION_PARAM)  
+        print(config.PegEnvConfig.COMPLIANCE_PARAM)
+
+        
     def start_impedance(self, stiffness=0.08):
         self.robot.SwitchMode(self.mode.NRT_CARTESIAN_MOTION_FORCE)
-        new_Kx = np.multiply(self.robot.info().K_x_nom, stiffness)
-        # set_trace()
-        # self.robot.SetCartesianImpedance(new_Kx, [0.8]*6)
+        #self.robot.SwitchMode(self.mode.NRT_JOINT_IMPEDANCE)
+        
+        # new_Kx = np.multiply(self.robot.info().K_x_nom, stiffness)
+        #initial_Kx = [800, 800, 800, 200, 200, 200]
+        new_Kx = [1200, 1200, 1200, 50, 50, 50]
+        #new_Kq = np.multiply(self.robot.info().K_q_nom, stiffness)
         self.robot.SetCartesianImpedance(new_Kx)
+        #self.robot.SetJointImpedance(new_Kq)
         self.logger.info(f"Start impedance! Cartesian stiffness set to {new_Kx}")
+        
         
     
     def stop_impedance(self):
         new_Kx = np.multiply(self.robot.info().K_x_nom, 1.0)
         self.robot.SetCartesianImpedance(new_Kx)
+        
+        #new_Kq = np.multiply(self.robot.info().K_q_nom, 1.0)
+        #self.robot.SetJointImpedance(new_Kq)
+        
         self.logger.info(f"Stop Impedance! Cartesian stiffness set to {new_Kx}")
         self.robot.SwitchMode(self.mode.NRT_PRIMITIVE_EXECUTION)
         
@@ -234,6 +266,7 @@ class FlexivServer:
 
 
 def main(_):
+    
 
     webapp = Flask(__name__)
 
@@ -243,11 +276,17 @@ def main(_):
     gripper_server = RobotiqGripperServer(pty_device='/dev/ttyUSB0') # fake gripper
 
     """Starts impedance controller"""
+    
     robot_server = FlexivServer()
+    
     
     robot_server.get_state()
     
     robot_server.start_impedance()
+    
+
+    
+    robot_server.output()
     
     robot_server.reset_joint()
 

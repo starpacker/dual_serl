@@ -57,7 +57,7 @@ class PegEnvConfig(DefaultEnvConfig):
     # TARGET_POSE = [0.7743712067604065,-0.03834529593586922,0.2679073214530945,-0.0024682849179953337,0.06168980151414871,0.9980902671813965,-0.0020353312138468027]
     # TARGET_POSE = [0.6008051633834839,-0.052534788846969604,0.22573457658290863,0.024103181436657906,0.9996849298477173,0.004863678943365812,0.005044732708483934]
     #TARGET_POSE = [0.6897345781326294,-0.0855565145611763,0.23157787322998047,-0.10760285705327988,0.994091808795929,-0.0054414356127381325,0.0131[71523809432983]
-    TARGET_POSE = [0.6483319401741028,-0.0007605736027471721,0.22615499794483185,-0.009632401168346405,0.018566621467471123,0.9997801780700684,0.001442493638023734]
+    TARGET_POSE = [0.6864198446273804,-0.026001252233982086,0.2315734326839447,0.00135876948479563,0.018258731812238693,0.9998273253440857,-0.003177440958097577]
     
     # TARGET_POSE = [0.68,-0.11,0.29,-0.00,0.00,1.00,-0.00] # [x,y,z,w,x,y,z] 
     # ['0.68', '-0.11', '0.29', '0.00', '-0.00', '1.00', '-0.00']
@@ -96,9 +96,12 @@ class PegEnvConfig(DefaultEnvConfig):
     COMPLIANCE_PARAM = {
         "translational_stiffness": 2000,
         "translational_damping": 89,
-        "rotational_stiffness": 150,
-        "rotational_damping": 7,
+        "rotational_stiffness": 50,
+        "rotational_damping": 2.6,
+        
         "translational_Ki": 0,
+        "rotational_Ki": 0,
+        
         "translational_clip_x": 0.003,
         "translational_clip_y": 0.003,
         "translational_clip_z": 0.01,
@@ -111,13 +114,14 @@ class PegEnvConfig(DefaultEnvConfig):
         "rotational_clip_neg_x": 0.02,
         "rotational_clip_neg_y": 0.02,
         "rotational_clip_neg_z": 0.02,
-        "rotational_Ki": 0,
     }
+
+    
     PRECISION_PARAM = {
         "translational_stiffness": 3000,
         "translational_damping": 89,
-        "rotational_stiffness": 300,
-        "rotational_damping": 9,
+        "rotational_stiffness": 100,
+        "rotational_damping": 3,
         "translational_Ki": 0.1,
         "translational_clip_x": 0.01,
         "translational_clip_y": 0.01,
